@@ -1,0 +1,43 @@
+---
+Title: Approach four: Ensemble of the four model
+Author: LHXS0
+output: html_notebook
+---
+```{r}
+# Read  individual prediction results
+pred_nn <- read.csv("submission_data_nn_best.csv")
+pred_cnn <- read.csv("submission_data_cnn_best.csv")
+pred_ens <- read.csv("submission_data_ens.csv")
+```
+
+```{r}
+# Assign weights to the model
+pred_ensemble<- 0.5*(pred_nn$Category)+0.3*(pred_cnn$Category)+0.2*(pred_ens$Category)
+```
+
+```{r}
+# Generate final prediction result
+pred_ensemble[pred_ensemble < 0.5] <- 0
+pred_ensemble[pred_ensemble >= 0.5 ] <- 1
+```
+
+```{r}
+pred_ensemble<- 0.8*(pred_nn$Category) - 0.2*(pred_cnn$Category)
+  
+#0.2*(pred_xgb$Category)
+```
+
+```{r}
+#pred_ensemble
+pred_ensemble[pred_ensemble == 0 ] <-'0'
+pred_ensemble[pred_ensemble == -0.2 ] <- '0'
+pred_ensemble[pred_ensemble == 0.8] <- '0'
+pred_ensemble[pred_ensemble == 0.6 ] <- '1'
+```
+
+```{r}
+test_data$Category = pred_ensemble
+test_data <- test_data %>% select(-text,-label,-ml_id)
+write.csv(test_data,"submission_data_nn_cnn_ml_2.csv",row.names = FALSE)
+```
+```

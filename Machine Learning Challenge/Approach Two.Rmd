@@ -1,0 +1,209 @@
+---
+Title: Approach two: Convolutional Neural Network with pretrained word embeddings
+Author: LHXS0
+output: html_notebook
+---
+
+```{r}
+Sys.setenv("CUDA_VISIBLE_DEVICES" = -1)   
+library(keras)  
+use_backend("tensorflow")
+library(tidyverse)
+library(tm)
+library(caret)
+```
+
+```{r}
+# Read training data and submitting data
+train_data <- read.csv("training_data.csv")
+test_data <- read.csv("submission_data_v2.csv")
+
+# Test label doesn't exist, so we need to assign a number to it.
+test_data$label = 100
+
+# Set training indices and validation indices
+train_indices <- 1:2000
+val_indices <- 1:200
+
+# Set an extra column to ensure that the data is correctly arranged after merged together
+train_data$ml_id <- c(1:2000)
+test_data$ml_id <- c(2001:3000)
+
+# Merge training and submission dataset and order.1-2000 are the train dataset with known labels. 2001-3000 are the submission dataset that we want to predict on.
+raw_data <-rbind(train_data,test_data)
+raw_data <- raw_data[order(raw_data$ml_id),]
+
+# We will not use quanteda to tokenize text. So we need to remove stopwords in the first place.
+clean_text <- raw_data$text        
+clean_text  <-  removeWords(clean_text,stopwords('en'))    
+raw_data$text <- clean_text 
+# Preprocessing raw data to remove special characters.
+raw_data <- raw_data %>% 
+   mutate(text = iconv(text, from = "UTF-8", to = "ASCII",sub=''))%>%
+  mutate(text = str_remove_all(text, "<br />")) %>%
+mutate(text = str_replace_all(text, "[^[:alnum:]]"," "))
+```
+
+```{r}
+# assign labels and texts
+labels<- raw_data$label
+texts<- raw_data$text
+```
+
+```{r}
+# We need to trim the length of the input text to increase computing speed. Use a boxplot to visualise its distribution.
+boxplot(nchar(texts))
+```
+
+```{r}
+# tokenize the text use tokenizer provided by keras
+maxlen = 2500 # We only consider the first 2500 words. 
+max_words <- 32518 
+tokenizer <- text_tokenizer(num_words = max_words) %>% 
+  fit_text_tokenizer(texts)
+sequences <- texts_to_sequences(tokenizer, texts)
+
+word_index = tokenizer$word_index
+cat("Found", length(word_index), "unique tokens.\n")
+
+data <- pad_sequences(sequences,maxlen = maxlen)
+labels <- as.array(labels)
+cat("Shape of data tensor:", dim(data), "\n")
+```
+
+```{r}
+# Split train and test data.
+x_train <- data[train_indices,]
+y_train <- labels[train_indices]
+
+x_test <- data[-train_indices,]
+y_test <- labels[-train_indices]
+
+# Split train and validation data.
+x_val <- data[val_indices,]
+partial_x_train <- x_train[-val_indices,]
+y_val <- labels[val_indices]
+partial_y_train <- y_train[-val_indices]
+```
+
+```{r}
+# Load pre trained word embeddings. We will use glove embedding with word vectors of 200 dimensions.
+glove_dir = './glove.6B'
+lines <- readLines(file.path(glove_dir, "glove.6B.200d.txt"))
+embeddings_index <- new.env(hash = TRUE, parent = emptyenv())
+for (i in 1:length(lines)) {
+  line <- lines[[i]]
+  values <- strsplit(line, " ")[[1]]
+  word <- values[[1]]
+  embeddings_index[[word]] <- as.double(values[-1])
+}
+```
+
+```{r}
+# Generate embedding matrix for glove word vectors..
+embedding_dim <- 200
+embedding_matrix <- array(0, c(max_words, embedding_dim))
+for (word in names(word_index)) {
+  index <- word_index[[word]]
+  if (index < max_words) {
+    embedding_vector <- embeddings_index[[word]]
+    if (!is.null(embedding_vector))
+      # Words not found in the embedding index will be all zeros.
+      embedding_matrix[index+1,] <- embedding_vector
+  }
+}
+```
+
+```{r}
+# Load pretrained document frequency for each word.
+# Code for obtaining the pretrained document frequency can be found at the end of this notebook.
+lines2 <- readLines("doc_freq.txt")
+embeddings_index2 <- new.env(hash = TRUE, parent = emptyenv())
+for (i in 1:length(lines2)) {
+  line2 <- lines2[[i]]
+  values2 <- strsplit(line2, " ")[[1]]
+  word2 <- values2[[1]]
+  embeddings_index2[[word2]] <- as.double(values2[-1])}
+```
+
+```{r}
+# Generate embedding matrix for document frequency.
+embedding_dim2 <- 1
+embedding_matrix2 <- array(0, c(max_words, embedding_dim2))
+for (word in names(word_index)) {
+  index <- word_index[[word]]
+  if (index < max_words) {
+    embedding_vector <- embeddings_index2[[word]]
+    if (!is.null(embedding_vector))
+      # Words not found in the embedding index will be all zeros.
+      embedding_matrix2[index+1,] <- embedding_vector
+  }
+}
+```
+
+```{r}
+# Merge the 200 dimension glove word embedding and the 1 dimension document frequency weight. The final dimension of the word embedding will be 201.
+embedding_matrix_combined <- (cbind(embedding_matrix2, embedding_matrix))
+dim(embedding_matrix_combined)
+```
+```{r}
+# The first layer is the embedding layer using the weight of pretrained word embedding.
+model <- keras_model_sequential() %>%
+layer_embedding(input_dim = 32518, output_dim = 201) %>%
+  layer_conv_1d(201, 5, activation='relu')%>%
+  layer_global_max_pooling_1d()%>%
+  layer_flatten() %>%
+  layer_dense(units = 32, activation = "relu")%>%
+  layer_dropout(0.2)%>%
+layer_dense(units = 1, activation = "sigmoid")
+summary(model)
+```
+
+```{r}
+# Get the weight of embedding layer. The weight will be frozen during training. 
+get_layer(model, index = 1) %>% 
+  set_weights(list(embedding_matrix_combined)) %>% 
+  freeze_weights()
+```
+
+```{r}
+# Use callbacks to perform early stopping and change learning rate during training. These measures ensure that you get the best performance from your model.
+callbacks_list <- list(
+  callback_early_stopping(monitor = "val_acc", patience = 5
+),
+
+# Model checkpoint saves the weight of your best model during training.
+callback_model_checkpoint(filepath = "cnn_best_model_weight.h5",
+                           monitor = "val_acc", save_best_only = TRUE,save_weights_only = TRUE,mode = c("max")),
+callback_reduce_lr_on_plateau(monitor = "val_loss", factor = 0.1, patience = 3
+))
+
+model %>% compile(
+  optimizer = "adam",
+  loss = "binary_crossentropy",
+  metrics = c("acc")
+)
+history <- model %>% fit(
+  partial_x_train, partial_y_train,
+  epochs = 10,
+  batch_size = 200,
+  validation_data = list(x_val, y_val),
+  callbacks = callbacks_list
+)
+```
+
+```{r}
+# Load the weight of the best model and predict its label for the submission dataset.
+model %>% load_model_weights_hdf5("cnn_best_model_weight.h5")
+predict_label <-model %>% 
+  predict_classes(x_val,verbose = 1)
+```
+
+```{r}
+# Finally, concatenate the label with Id, drop other columns and save it as a csv file so that it can be submitted to kaggle.
+test_data$Category = predict_label
+test_data <- test_data %>% select(-text,-label,-ml_id)
+write.csv(test_data,"submission_data_cnn_best.csv",row.names = FALSE)
+```
+
+

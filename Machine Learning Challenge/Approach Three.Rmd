@@ -1,0 +1,191 @@
+---
+Title: Approach Three: Ensemble model (Random Forest, Support Vector Machine, XGBoost and Naïve Bayes) 
+Author: LHXS0
+output: html_notebook
+---
+
+```{r}
+library(caret)
+library(pROC)
+library(tidyverse)
+library(quanteda)
+library(mlbench)
+library(caretEnsemble)
+library(syuzhet)
+```
+
+```{r}
+# Read training data and submitting data
+train_data <- read.csv("training_data.csv")
+test_data <- read.csv("submission_data_v2.csv")
+test_data$label = 'NA'
+# Set training indices and validation indices
+train_indices <- 1:2000
+val_indices <- 1:200
+# Set an extra column to ensure that the data is correctly arranged after merged together
+train_data$ml_id <- c(1:2000)
+test_data$ml_id <- c(2001:3000)
+
+# Merge training and submission dataset and order.1-2000 are the train dataset with known labels. 2001-3000 are the submission dataset that we want to predict on.
+raw_data <-rbind(train_data,test_data)
+raw_data <- raw_data[order(raw_data$ml_id),]
+raw_data$merge_id <- c(1:3000)
+# Preprocessing raw data to remove special characters.
+raw_data <- raw_data %>% 
+   mutate(text = iconv(text, from = "UTF-8", to = "ASCII",sub=''))%>%
+  mutate(text = str_remove_all(text, "<br />")) 
+```
+
+```{r}
+# Tokenize text data and return an dfm object.
+tokens = raw_data$text %>% 
+tokens(remove_punct = T,remove_symbols=T,remove_numbers=T,remove_url=T,
+         split_hyphens = T)%>%
+  tokens_remove(quanteda::stopwords(language = "en")) %>%
+  tokens_remove(min_nchar = 2) %>%
+  dfm()
+```
+
+```{r}
+# Extract document level features.
+lexdiv <- textstat_lexdiv(tokens)
+
+cli = textstat_readability(raw_data$text, measure = 'Coleman.Liau')
+raw_data$cli = cli$Coleman.Liau
+raw_data$sentiment_score = get_sentiment(raw_data$text)
+raw_data$lexdiv = lexdiv$TTR
+
+raw_data<- raw_data %>% 
+  mutate(ntype = ntype(raw_data$text)) %>% 
+  mutate(nsentences = nsentence(raw_data$text)) %>%
+  mutate(nwords = ntoken(raw_data$text)) %>%
+  mutate(type_token_ratio = ntype/nwords) %>%
+  mutate(word_sentence_ratio = nwords/nsentences)
+```
+
+```{r}
+# Calculate an inverse loge document frequency matrix for all unique tokens. 
+doc_freq <- docfreq(
+  tokens,
+  scheme =  "inverse",
+  base = exp(1),
+  smoothing = 0,
+  k = 0,
+  threshold = 0
+)
+
+# Convert to dataframe for the convenience of calculation.
+doc_freq_mt <- as.data.frame(doc_freq)
+
+# This step will weight the feature frequencies of a dfm. It will recode all non-zero counts as 1. We only care if specific token appears in a document all not, the count doesn't matter.
+ml_tokens <- dfm_weight(tokens,scheme='boolean')
+ml_tokens <- as.data.frame(ml_tokens)
+ml_tokens <- ml_tokens[,-1]
+
+# Finally, use sweep function to calculate the weighted inverse loge document frequency matrix for the text column. This matrix reflects the rareness of the vocabularies adopted by each comment.
+ml_tokens_cal<- sweep(ml_tokens, MARGIN=2, doc_freq_mt[['doc_freq']], `*`)
+
+
+# Using the above mentioned matrix, we can build three new featurs: count of rare words, sum rare score and average rare score. However, we will only use average and sum rare score as new features.
+ml_tokens_cal$count <- rowSums(ml_tokens_cal!=0)
+ml_tokens_cal$sum_rare_score <- rowSums(ml_tokens_cal, na.rm = TRUE)
+ml_tokens_cal$avg_rare_score <- (ml_tokens_cal$sum_rare_score/ml_tokens_cal$count)
+
+# Add an extra column to merge data.
+ml_tokens_cal$merge_id <- c(1:3000)
+head(ml_tokens_cal)
+```
+
+```{r}
+ml_data_combined <- merge(raw_data%>%select(id,merge_id,label,ntype,cli,lexdiv,type_token_ratio,word_sentence_ratio,nsentences,sentiment_score),ml_tokens_cal%>%select(merge_id,sum_rare_score,avg_rare_score,count),by='merge_id')%>%select(-merge_id)
+
+head(ml_data_combined)
+```
+
+```{r}
+# Caret can't take numeric input as labels. So convert it to categorical. 
+ml_data_combined$label <-
+  ifelse(raw_data$label == "0",
+         "perturbed",
+         "original")
+```
+
+
+```{r}
+# Select 200 validation sample.
+val_indices <- seq(1, 2000, 10)
+c_train <- train_data$id
+c_test <- test_data$id
+data_train <- subset(ml_data_combined, id %in% c_train) %>% select(-id)
+data_test <- subset(ml_data_combined, id %in% c_test) %>% select(-id)
+
+data_val <- data_train[val_indices,]
+partial_data_train <- data_train[-val_indices,]
+```
+
+```{r}
+# The validation sample has 200 dimensions.
+dim(data_val)
+```
+```{r}
+training_controls = trainControl(method = "repeatedcv",
+                           number = 3,
+                        search = 'random',
+                        savePredictions="final",
+                        classProbs= TRUE)
+
+
+# Ensemble model with four algorithms.
+model_list <- caretList(
+  label~.,
+  data = partial_data_train,
+  metric='Accuracy',
+  trControl=training_controls,
+  preProcess = c('zv',"scale","center"),
+  methodList=c("rf", "svmLinear","xgbDART","naive_bayes")
+  )
+```
+
+```{r}
+# Examine the ensemble model
+greedy_ensemble <- caretEnsemble(
+  model_list, 
+  metric="acc",
+  trControl=trainControl(
+    number=3,
+   
+    classProbs=TRUE
+    ))
+summary(greedy_ensemble)
+```
+```{r}
+# Plot feature importance
+importance <- varImp(model_list$xgbDART)
+plot(importance)
+```
+
+```{r}
+pred = predict(greedy_ensemble, data_val)
+
+# confusion matrix
+confusionMatrix(pred, as.factor(data_val$label), mode="prec_recall")
+```
+```{r}
+# Predict on submission dataset
+pred_submission = predict(greedy_ensemble, data_test)
+data_submission <- subset(ml_data_combined, id %in% c_test)
+data_submission$Category <- pred_submission
+data_submission <- data_submission %>% select(id,Category)
+
+# Convert category back to 0 and 1.
+data_submission$Category <-
+  ifelse(data_submission$Category == "perturbed",
+         "0",
+         "1")
+```
+
+```{r}
+# Finally, concatenate the label with Id, drop other columns and save it as a csv file so that it can be submitted to kaggle.
+write.csv(data_submission,"submission_data_ensemble.csv",row.names = FALSE)
+```
+
