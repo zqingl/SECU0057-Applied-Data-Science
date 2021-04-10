@@ -1,0 +1,175 @@
+---
+Title: Approach one:Deep Neural Network (The best one)
+Author: LHXS0
+output: html_notebook
+---
+
+```{r}
+Sys.setenv("CUDA_VISIBLE_DEVICES" = -1)   
+library(keras)  
+use_backend("tensorflow")
+library(tidyverse)
+library(quanteda)
+library(syuzhet)
+```
+
+```{r}
+# Read training data and submitting data
+train_data <- read.csv("training_data.csv")
+test_data <- read.csv("submission_data_v2.csv")
+test_data$label = 'NA'
+# Set training indices and validation indices
+train_indices <- 1:2000
+val_indices <- 1:200
+# Set an extra column to ensure that the data is correctly arranged after merged together
+train_data$ml_id <- c(1:2000)
+test_data$ml_id <- c(2001:3000)
+
+# Merge training and submission dataset and order.1-2000 are the train dataset with known labels. 2001-3000 are the submission dataset that we want to predict on.
+raw_data <-rbind(train_data,test_data)
+raw_data <- raw_data[order(raw_data$ml_id),]
+
+# Preprocessing raw data to remove special characters.
+raw_data <- raw_data %>% 
+   mutate(text = iconv(text, from = "UTF-8", to = "ASCII",sub=''))%>%
+  mutate(text = str_remove_all(text, "<br />")) %>%
+mutate(text = str_replace_all(text, "[^[:alnum:]]"," "))
+
+```
+
+```{r}
+# Tokenize text data and return an dfm object.
+tokens = raw_data$text %>% 
+tokens(remove_punct = T,remove_symbols=T,remove_numbers=T,remove_url=T,
+         split_hyphens = T)%>%
+  tokens_remove(stopwords(language = "en")) %>%
+  tokens_remove(min_nchar = 2) %>%
+  dfm()
+```
+
+```{r}
+# Calculate an inverse loge document frequency matrix for all unique tokens. 
+doc_freq <- docfreq(
+  tokens,
+  scheme =  "inverse",
+  base = 2.718281,
+  smoothing = 0,
+  k = 0,
+  threshold = 0
+)
+
+# Convert to dataframe for the convenience of calculation.
+doc_freq_mt <- as.data.frame(doc_freq)
+
+# This step will weight the feature frequencies of a dfm. It will recode all non-zero counts as 1. We only care if specific token appears in a document or not, the count doesn't matter.
+ml_tokens <- dfm_weight(tokens,scheme='boolean')
+ml_tokens <- as.data.frame(ml_tokens)
+ml_tokens <- ml_tokens[,-1]
+
+# Finally, use sweep function to calculate the weighted inverse loge document frequency matrix for the text column. This matrix reflects the rareness of the vocabularies adopted by each comment.
+ml_tokens_cal<- sweep(ml_tokens, MARGIN=2, doc_freq_mt[['doc_freq']], `*`)
+head(ml_tokens_cal)
+```
+
+```{r}
+# Using the above mentioned matrix, we can build three new featurs: count of rare words, sum rare score and average rare score. However, we will only use average and sum rare score as new features.
+ml_tokens_cal$count <- rowSums(ml_tokens_cal!=0)
+ml_tokens_cal$sum_rare_score <- rowSums(ml_tokens_cal, na.rm = TRUE)
+ml_tokens_cal$avg_rare_score <- (ml_tokens_cal$sum_rare_score/ml_tokens_cal$count)
+```
+
+
+```{r}
+# It's obvious that the perturbed comments tend to use rare words compared to the original comments. However, it seems that the difference in the sum rare score is smaller. We will use avg and sum rare score as new features.
+boxplot(ml_tokens_cal[train_indices,]$avg_rare_score ~ train_data$label,names=c("Perturbed","Original"),ylab="Avg Rare Score")
+boxplot(ml_tokens_cal[train_indices,]$sum_rare_score ~ train_data$label,names=c("Perturbed","Original"),ylab="Sum Rare Score")
+```
+```{r}
+# Use avg and sum rare score with the inverse loge weighted document frequency matrix as input features. Drop the count column.
+ml_tokens_cal <-ml_tokens_cal %>% select(-count)
+```
+
+```{r}
+# Finally, we will covert the data frame into matrix that is accepted by Keras.
+input_features <- data.matrix(ml_tokens_cal)
+```
+
+```{r}
+# Split train and test data.
+x_train <- input_features[train_indices,]
+y_train <- as.numeric(raw_data[train_indices,]$label)
+x_test <- input_features[-train_indices,]
+y_test <- as.numeric(raw_data[-train_indices,]$label)
+
+# Split train and validation data.
+partial_x_train <- x_train[-val_indices,]
+partial_y_train <- y_train[-val_indices]
+x_val <- x_train[val_indices,]
+y_val <- y_train[val_indices]
+
+# The final input training data is a 1800*32166 matrix. That is, we have 1800 samples, each sample with 32166 features.
+dim(partial_x_train)
+```
+```{r}
+# We use deep a neural network with three dense layers. Dropout layer and regularization are employed to prevent the model from overfitting.
+model <- keras_model_sequential() %>%
+  layer_dense(units = 256, input_shape = c(32166),activation = "relu",regularizer_l1_l2(l1=0.05,l2=0.05)) %>%
+layer_dropout(0.5) %>%
+ layer_dense(units = 128, activation = "relu",regularizer_l1_l2(l1=0.05,l2=0.05)) %>%
+layer_dropout(0.5) %>%
+    layer_dense(units = 32, activation = "relu",regularizer_l1_l2(l1=0.05,l2=0.05)) %>%
+ layer_dense(units = 1, activation = "sigmoid")
+summary(model)
+```
+
+```{r}
+# Use callbacks to perform early stopping and change learning rate during training. These measures ensure that you get the best performance from your model.
+callbacks_list <- list(
+  callback_early_stopping(monitor = "val_accuracy", patience = 5
+),
+
+# Model checkpoint saves the weight of your best model during training.
+callback_model_checkpoint(filepath = "nn_best_model_weight.h5",
+                           monitor = "val_accuracy", save_best_only = TRUE,save_weights_only = TRUE,mode = c("max")),
+callback_reduce_lr_on_plateau(monitor = "val_loss", factor = 0.1, patience = 3
+))
+
+# Use Adam as optimizer because it works well on sparse dataset.
+model %>% compile(
+ optimizer = 'adam',
+ loss = "binary_crossentropy",
+ metrics = c("accuracy")
+)
+```
+
+```{r}
+# A batch size of 150 is a very good value after multiple test. 15 epochs are enough for the loss to converge.
+history<-model %>% fit(
+ partial_x_train,
+ partial_y_train,
+ epochs = 15,
+ batch_size = 150,
+ callbacks = callbacks_list,
+ validation_data = list(x_val, y_val)
+)
+```
+```{r}
+# We can see that the training accuracy reach almost 100% while the validation accuracy stops at 70%. Not a bad score, but the model still doesn't generalize well. More data points are needed to achieve a higher score.
+plot(history)
+```
+
+```{r}
+# Load the weight of the best model and predict its label for the submission dataset.
+model %>% load_model_weights_hdf5("nn_best_model_weight.h5")
+predict_label <-model %>% 
+  predict_classes(x_test,verbose = 1)
+```
+
+```{r}
+# Finally, concatenate the label with Id, drop other columns and save it as a csv file so that it can be submitted to kaggle.
+test_data$Category = predict_label
+test_data <- test_data %>% select(-text,-label,-ml_id)
+write.csv(test_data,"submission_data_nn_best.csv",row.names = FALSE)
+```
+
+
