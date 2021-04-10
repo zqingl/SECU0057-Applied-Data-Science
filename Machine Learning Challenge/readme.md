@@ -1,11 +1,7 @@
-Welcome to the Machine Learning Challenge for SECU0050 and SECU0057.
-Note: the deliverables and grading criteria are different for SECU0050 and SECU0057 but the competition details are the same!
+#Welcome to the Machine Learning Challenge for SECU0050 and SECU0057.
 
-Weight for the final grade: 30%
-Learning outcomes tested: (1) demonstrating knowledge of a broader range of analytical techniques used in the field of Security and Crime Science, (2) understanding the purpose, advantages and disadvantages of different forms of data science techniques, (3) interpreting the results of data science techniques.
-Deadline: 31 March 2021, 4pm
-Background
-In this part of the assessment, you can put your text mining and machine learning skills to use. The machine learning challenge is inspired by so-called "shared tasks" and Kaggle-challenges, where many researchers/analysts compete against each other in solving one problem.
+##Background
+##In this part of the assessment, you can put your text mining and machine learning skills to use. The machine learning challenge is inspired by so-called "shared tasks" and Kaggle-challenges, where many researchers/analysts compete against each other in solving one problem.##
 
 The problem is typically a classification challenge: you are provided with training data that allow you to build a classification system that learns to differentiate between two (or more) outcomes. For example, the training data could consist of movie reviews and a label associated with them (e.g. positive review vs negative review). The task is to build a classification system (i.e. extracting variables needed for classification and choosing algorithms) that you submit and evaluate at a later stage on unseen (i.e. new) data (so-called test data).
 
